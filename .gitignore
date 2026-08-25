@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 凭据 / 敏感文件（无论如何都不要提交！）
+.env
+*.key
+*secret*
+*credential*
+HANDOVER.md
+MEMORY.md
+
+# OS / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 数据库快照
+*.db
+*.sqlite
+*.sqlite3
