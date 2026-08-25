@@ -8,7 +8,7 @@ agent_created: true
 
 ## Overview
 
-This skill drives the new-api (Calium-Ion/new-api) admin REST API to create, update, and verify **channels** (upstream API providers) on a user's gateway. It exists because the API has several non-obvious behaviors that cause silent failures ("channel cannot be empty", 404, "record not found") if the wrong request shape is used.
+This skill drives the new-api (QuantumNous/new-api) admin REST API to create, update, and verify **channels** (upstream API providers) on a user's gateway. It exists because the API has several non-obvious behaviors that cause silent failures ("channel cannot be empty", 404, "record not found") if the wrong request shape is used.
 
 Scope: OpenAI-compatible channels (type `1`) are the common case; other channel types follow the same envelope but differ in `base_url`/`key` semantics. Always confirm the channel `type` integer from an existing channel of the same provider before creating.
 
@@ -16,7 +16,12 @@ Scope: OpenAI-compatible channels (type `1`) are the common case; other channel 
 
 1. **Login is required for admin endpoints.** The model-serving token (`sk-...`) only calls `/v1/*`. To manage channels, log in with **username + password** at `POST /api/user/login`; the response `data.access_token` is the Bearer token for `/api/channel*`.
 2. **A failed login is HTTP 200, not 4xx.** Wrong password or banned user returns `200 {"message":"Username or password is incorrect, or user has been banned","success":false}` — there is NO `data.access_token`. Never treat HTTP 200 as success; check for `data.access_token` / `success`.
-3. **Single-session limit.** new-api allows only **1 concurrent session per user**. If the web dashboard is logged in, the script login returns `409 {"code":"AUTH_SESSION_LIMIT","message":"Conflict","success":false}` — ask the user to log out of the browser first, then retry.
+3. **`409 AUTH_SESSION_LIMIT` means the session quota is FULL, not "1 device only".** new-api (v1.0.0-rc.25) allows **50 active login sessions per user** (`common.UserSessionActiveLimit`). Sessions **never auto-expire or get cleaned** — every successful script/browser login creates one and it stays `active` forever. When script logins pile up (e.g. repeated login-per-request automation), the quota fills and any new login returns `409 {"code":"AUTH_SESSION_LIMIT","message":"Conflict","success":false}`. Fix: revoke stale sessions in the DB and restart new-api (clears the session cache):
+   ```sql
+   UPDATE user_sessions SET status='revoked', revoked_at=strftime('%s','now'), revoked_reason='manual_cleanup'
+   WHERE status='active' AND created_at < strftime('%s','2026-08-24 00:00:00');
+   ```
+   Then `docker restart new-api`. Reuse one access token across API calls instead of logging in per request — it's valid ~15 min and avoids refilling the quota.
 4. **Create uses a NESTED body.** `POST /api/channel` must be `{"mode":"single","channel":{...field...}}`. Sending channel fields flat at the top level yields `{"message":"channel cannot be empty"}` (the inner `Channel` is nil → `Key==""`).
 5. **`models` and `model_mapping` are STRINGS**, not arrays/objects:
    - `models`: comma-separated, e.g. `"[gmi]MiniMaxAI/MiniMax-M3"`.
@@ -30,7 +35,7 @@ Scope: OpenAI-compatible channels (type `1`) are the common case; other channel 
 ## Workflow
 
 ### 1. Authenticate
-`POST /api/user/login` with `{"username":<user>,"password":<pw>}`. Parse `data.access_token`. Reuse this token for all subsequent calls in the same session (it expires in ~15 min; if expired, the session slot frees and a fresh login works).
+`POST /api/user/login` with `{"username":<user>,"password":<pw>}`. Parse `data.access_token`. Reuse this token for all subsequent calls in the same session (it expires in ~15 min; if expired, log in again — but beware: **every successful login creates a persistent active session** (quota 50); call `/api/user/logout` when done, or periodically clean stale sessions as in gotcha 3.
 
 ### 2. Inspect existing channels (templates + correct type)
 `GET /api/channel?p=1&page_size=100`. Note the `type`, `base_url` (no `/v1`), and `model_mapping` format of a same-provider channel to copy. `GET /api/channel/<id>` returns the full record.
